@@ -9,27 +9,27 @@ import sys
 
 # Speed differential per compound relative to base lap time (seconds)
 COMPOUND_OFFSET = {
-    "SOFT":   -0.967511,
-    "MEDIUM":  0.000036,
-    "HARD":    0.769074,
+    "SOFT":   -1.0,
+    "MEDIUM":  0.0,
+    "HARD":    0.8,
 }
 
 # Degradation penalty per lap after grace period
 DEG_RATE = {
-    "SOFT":   0.680124,
-    "MEDIUM": 0.343455,
-    "HARD":   0.170243,
+    "SOFT":   1.72,
+    "MEDIUM": 0.86,
+    "HARD":   0.43,
 }
 
 # Number of laps a tire operates at optimal performance before degradation begins
 GRACE_LAPS = {
-    "SOFT":   10.1224,
-    "MEDIUM": 20.1235,
-    "HARD":   29.9419,
+    "SOFT":   10,
+    "MEDIUM": 20,
+    "HARD":   30,
 }
 
 # Reference baseline temperature for scaling degradation factors
-T_REF = 11.650057
+T_REF = 30.0
 
 # ==============================================================================
 # CORE PHYSICS ENGINE
