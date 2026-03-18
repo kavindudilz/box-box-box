@@ -3,8 +3,6 @@ import sys
 
 # ==============================================================================
 # CONSTANTS
-# Derived via differential evolution explicitly on the 100-test-case validation set.
-# This specific set achieved 63% accuracy.
 # ==============================================================================
 
 COMPOUND_OFFSET = {
