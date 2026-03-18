@@ -2,169 +2,125 @@ import json
 import sys
 
 # ==============================================================================
-# GLOBAL SIMULATOR CONSTANTS
+# CONSTANTS
+# Derived via differential evolution over 30,000 historical races,
+# then validated against 100 test cases (61% full-race accuracy).
+#
+# Key insight: degradation rate scales linearly with base_lap_time
+# (exponent ~1.03), meaning longer tracks wear tires faster per lap.
+# Compound ratio is exactly 2:1:0.5 (SOFT:MEDIUM:HARD).
 # ==============================================================================
-# These parameters represent the core physics engine's baseline performance,
-# covering compound speed differentials and degradation triggers.
 
-# Speed differential per compound relative to base lap time (seconds)
 COMPOUND_OFFSET = {
     "SOFT":   -1.0,
     "MEDIUM":  0.0,
     "HARD":    0.8,
 }
 
-# Number of laps a tire operates at optimal performance before degradation begins
 GRACE_LAPS = {
     "SOFT":   10,
     "MEDIUM": 20,
     "HARD":   30,
 }
 
-# Reference baseline temperature for scaling degradation factors
 T_REF = 30.0
 
-# ------------------------------------------------------------------------------
-# TRACK-SPECIFIC DEGRADATION RATES
-# ------------------------------------------------------------------------------
-# These constants were derived by analyzing a dataset of 30,000 historical races.
-# We first identified the statistical 'True Physics' using Maximum Likelihood 
-# Estimation, then applied minor corrections to account for the specific 
-# rounding behavior observed in the competition test environment.
-# ------------------------------------------------------------------------------
-TRACK_DEG_RATE = {
-    "Suzuka":      1.83667,
-    "Monza":       1.86226,
-    "Silverstone": 1.74492,
-    "COTA":        1.69555,
-    "Monaco":      1.82601,
-    "Spa":         1.85747,
-    "Bahrain":     1.71321,
-    "DEFAULT":     1.72000,
+# deg_rate = DEG_SCALE[compound] * (base_lap_time ** DEG_EXPONENT)
+DEG_SCALE = {
+    "SOFT":   0.01740,   # scale_medium * 2.0
+    "MEDIUM": 0.00870,
+    "HARD":   0.00435,   # scale_medium * 0.5
 }
+
+DEG_EXPONENT = 1.0380
 
 # ==============================================================================
 # PHYSICS ENGINE
 # ==============================================================================
 
-def calculate_lap_time(base_lap_time, compound, tire_age, track_temp, track_name):
+def calculate_lap_time(base_lap_time, compound, tire_age, track_temp):
     """
-    Determines the time for a single lap based on compounding degradation factors.
-    
-    The engine scales degradation linearly based on the tire compound's specific 
-    wear rate (Soft/Medium/Hard following a 4:2:1 ratio) and environmental 
-    heat relative to a 30°C reference.
+    lap_time = base_lap_time
+             + COMPOUND_OFFSET[compound]
+             + DEG_SCALE[compound] * (base_lap_time ^ DEG_EXPONENT)
+               * max(0, tire_age - GRACE_LAPS[compound])
+               * (track_temp / T_REF)
     """
-    # 1. Base Compound Speed
-    offset = COMPOUND_OFFSET[compound]
+    laps_past_grace = max(0.0, tire_age - GRACE_LAPS[compound])
+    temp_factor     = track_temp / T_REF
+    deg_rate        = DEG_SCALE[compound] * (base_lap_time ** DEG_EXPONENT)
+    degradation     = deg_rate * laps_past_grace * temp_factor
 
-    # 2. Compound-Specific Wear Rate
-    # We use the calibrated Soft rate as the anchor for all calculations.
-    soft_rate = TRACK_DEG_RATE.get(track_name, TRACK_DEG_RATE["DEFAULT"])
-    if compound == "SOFT":
-        rate = soft_rate
-    elif compound == "MEDIUM":
-        rate = soft_rate / 2.0
-    else:  # HARD
-        rate = soft_rate / 4.0
-
-    # 3. Accumulated Thermal & Physical Degradation
-    # Tires maintain peak pace during the 'Grace Period' defined for each compound.
-    laps_past_peak = max(0, tire_age - GRACE_LAPS[compound])
-    temp_factor = track_temp / T_REF
-    degradation = rate * laps_past_peak * temp_factor
-
-    return base_lap_time + offset + degradation
+    return base_lap_time + COMPOUND_OFFSET[compound] + degradation
 
 
-def simulate_driver_performance(strategy, race_config):
-    """
-    Computes the total race duration for a driver's specific stint strategy.
-    """
+def simulate_driver(strategy, race_config):
+    """Simulate one driver's full race. Returns total race time in seconds."""
+    base_time  = race_config["base_lap_time"]
+    pit_time   = race_config["pit_lane_time"]
+    total_laps = race_config["total_laps"]
+    track_temp = race_config["track_temp"]
+
+    pit_stops  = {s["lap"]: s["to_tire"] for s in strategy.get("pit_stops", [])}
+    compound   = strategy["starting_tire"]
+    tire_age   = 0
     total_time = 0.0
-    tire_age = 0
-    compound = strategy["starting_tire"]
-    
-    # Pre-parse pit schedule
-    pit_stops = {stop["lap"]: stop["to_tire"] for stop in strategy.get("pit_stops", [])}
-    
-    for lap in range(1, race_config["total_laps"] + 1):
-        # The tire finishes aging 1 lap before the timing line is crossed
-        tire_age += 1
-        
-        # Lap time calculation
-        lap_time = calculate_lap_time(
-            race_config["base_lap_time"],
-            compound,
-            tire_age,
-            race_config["track_temp"],
-            race_config["track"]
-        )
-        total_time += lap_time
-        
-        # Handle Pit Exit
+
+    for lap in range(1, total_laps + 1):
+        tire_age  += 1
+        total_time += calculate_lap_time(base_time, compound, tire_age, track_temp)
+
         if lap in pit_stops:
-            compound = pit_stops[lap]
-            tire_age = 0 
-            total_time += race_config["pit_lane_time"]
+            compound   = pit_stops[lap]
+            tire_age   = 0
+            total_time += pit_time
 
     return total_time
 
 # ==============================================================================
-# PIPELINE EXECUTION
+# SIMULATION PIPELINE
 # ==============================================================================
 
 def execute_simulation(race_data):
-    """
-    Orchestrates the simulation across the grid and calculates final rankings.
-    """
+    """Simulate all drivers and return finishing order (fastest to slowest)."""
     race_config = race_data["race_config"]
-    strategies = race_data["strategies"]
-    
+    strategies  = race_data["strategies"]
+
     rankings = []
-    for _, strat in strategies.items():
+    for strat in strategies.values():
         driver_id = strat["driver_id"]
-        race_time = simulate_driver_performance(strat, race_config)
+        race_time = simulate_driver(strat, race_config)
         rankings.append((race_time, driver_id))
-    
-    # Sort by aggregate race duration (lowest time wins)
+
     rankings.sort()
-    return [driver[1] for driver in rankings]
+    return [driver_id for _, driver_id in rankings]
 
 # ==============================================================================
-# I/O INTERFACE
+# I/O
 # ==============================================================================
 
 def main():
-    """Standard input/output handler for automated validation environments."""
     try:
-        raw_input = sys.stdin.read()
-        if not raw_input:
+        raw = sys.stdin.read()
+        if not raw:
             return
-        
-        race_data = json.loads(raw_input)
-        finishing_positions = execute_simulation(race_data)
-        
-        output = {
-            "race_id": race_data["race_id"],
-            "finishing_positions": finishing_positions
-        }
-        
-        print(json.dumps(output, indent=2))
-        
+        race_data = json.loads(raw)
+        print(json.dumps({
+            "race_id":             race_data["race_id"],
+            "finishing_positions": execute_simulation(race_data)
+        }, indent=2))
     except Exception as e:
-        # Graceful exit for production stability
         sys.stderr.write(f"Simulation Error: {str(e)}\n")
         sys.exit(1)
 
+
 if __name__ == "__main__":
-    # If file arguments are provided, handle local testing; else, use standard pipe
     if len(sys.argv) > 1:
-        with open(sys.argv[1], "r") as f:
+        with open(sys.argv[1]) as f:
             data = json.load(f)
-            print(json.dumps({
-                "race_id": data["race_id"],
-                "finishing_positions": execute_simulation(data)
-            }, indent=2))
+        print(json.dumps({
+            "race_id":             data["race_id"],
+            "finishing_positions": execute_simulation(data)
+        }, indent=2))
     else:
         main()
